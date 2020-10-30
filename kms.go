@@ -17,6 +17,7 @@ import (
 )
 
 // Major TODOS:
+// - timeouts
 // - request input validations
 // - error embellishment and wrapping
 // - testing - Andres-GC
@@ -26,11 +27,12 @@ var (
 )
 
 const (
-	keyPrefix = "SPIRE_SERVER_KEY:"
+	aliasPrefix = "alias/"
+	keyPrefix   = "SPIRE_SERVER_KEY/"
 )
 
 type keyEntry struct {
-	AwsKeyID     string
+	KMSKeyID     string
 	CreationDate time.Time
 	PublicKey    *keymanager.PublicKey
 }
@@ -70,15 +72,15 @@ func (p *Plugin) Configure(ctx context.Context, req *plugin.ConfigureRequest) (*
 	}
 
 	// TODO: pagination
-	listKeysResp, err := p.kmsClient.ListKeysWithContext(ctx, &kms.ListKeysInput{})
+	aliasesResp, err := p.kmsClient.ListAliasesWithContext(ctx, &kms.ListAliasesInput{})
 	if err != nil {
 		return nil, err
 	}
 
-	for _, key := range listKeysResp.Keys {
-		err := p.processKMSKey(ctx, key.KeyId)
+	for _, alias := range aliasesResp.Aliases {
+		err := p.processAWSKey(ctx, alias.AliasName, alias.TargetKeyId)
 		if err != nil {
-			p.log.Error("Failed to process kms key.", "KeyId", *key.KeyId, "error", err)
+			p.log.With("KeyID", *alias.TargetKeyId).Warn("Failed to process kms key: %v", err)
 		}
 	}
 
@@ -87,51 +89,54 @@ func (p *Plugin) Configure(ctx context.Context, req *plugin.ConfigureRequest) (*
 
 func (p *Plugin) GenerateKey(ctx context.Context, req *keymanager.GenerateKeyRequest) (*keymanager.GenerateKeyResponse, error) {
 	spireKeyID := req.KeyId
-	description := fmt.Sprintf("%v%v", keyPrefix, spireKeyID)
-	keySpec, err := keySpecFromKeyType(req.KeyType)
+	alias := getAlias(spireKeyID)
+
+	newEntry, err := p.createKey(ctx, spireKeyID, req.KeyType)
 	if err != nil {
 		return nil, err
-	}
-
-	createKeyInput := &kms.CreateKeyInput{
-		Description:           aws.String(description), //TODO: check using alias instead
-		KeyUsage:              aws.String(kms.KeyUsageTypeSignVerify),
-		CustomerMasterKeySpec: aws.String(keySpec),
-		//TODO: look into policies
-	}
-
-	key, err := p.kmsClient.CreateKeyWithContext(ctx, createKeyInput)
-	if err != nil {
-		return nil, err
-	}
-
-	pub, err := p.kmsClient.GetPublicKeyWithContext(ctx, &kms.GetPublicKeyInput{KeyId: key.KeyMetadata.KeyId})
-	if err != nil {
-		return nil, err
-	}
-
-	newEntry := &keyEntry{
-		AwsKeyID:     *pub.KeyId,
-		CreationDate: *key.KeyMetadata.CreationDate,
-		PublicKey: &keymanager.PublicKey{
-			Id:       spireKeyID,
-			Type:     req.KeyType,
-			PkixData: pub.PublicKey,
-		},
 	}
 
 	oldEntry, hasOldEntry := p.entry(spireKeyID)
-	ok := p.setEntry(spireKeyID, newEntry)
 
-	// only delete if an old entry was replaced by a new one
-	if hasOldEntry && ok {
-		_, err := p.kmsClient.ScheduleKeyDeletionWithContext(ctx, &kms.ScheduleKeyDeletionInput{KeyId: &oldEntry.AwsKeyID})
+	if !hasOldEntry {
+		//create alias
+		_, err = p.kmsClient.CreateAliasWithContext(ctx, &kms.CreateAliasInput{
+			AliasName:   aws.String(alias),
+			TargetKeyId: &newEntry.KMSKeyID,
+		})
 		if err != nil {
 			return nil, err
 		}
+
+		//set map
+		p.setEntry(spireKeyID, newEntry)
+
+		return &keymanager.GenerateKeyResponse{PublicKey: newEntry.PublicKey}, nil
+	}
+
+	//update alias
+	_, err = p.kmsClient.UpdateAliasWithContext(ctx, &kms.UpdateAliasInput{
+		AliasName:   aws.String(alias),
+		TargetKeyId: &newEntry.KMSKeyID,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	//update map
+	p.setEntry(spireKeyID, newEntry)
+
+	//schedule delete
+	_, err = p.kmsClient.ScheduleKeyDeletionWithContext(ctx, &kms.ScheduleKeyDeletionInput{
+		KeyId:               &oldEntry.KMSKeyID,
+		PendingWindowInDays: aws.Int64(7),
+	})
+	if err != nil {
+		p.log.With("KeyID", &oldEntry.KMSKeyID).Error("It was not possible to schedule deletion for key: %v", err)
 	}
 
 	return &keymanager.GenerateKeyResponse{PublicKey: newEntry.PublicKey}, nil
+
 }
 
 func (p *Plugin) SignData(ctx context.Context, req *keymanager.SignDataRequest) (*keymanager.SignDataResponse, error) {
@@ -146,7 +151,7 @@ func (p *Plugin) SignData(ctx context.Context, req *keymanager.SignDataRequest) 
 	}
 
 	signResp, err := p.kmsClient.SignWithContext(ctx, &kms.SignInput{
-		KeyId:            &keyEntry.AwsKeyID,
+		KeyId:            &keyEntry.KMSKeyID, //TODO: use alias instead
 		Message:          req.Data,
 		MessageType:      aws.String(kms.MessageTypeDigest),
 		SigningAlgorithm: aws.String(signingAlgo),
@@ -185,17 +190,11 @@ func (p *Plugin) GetPluginInfo(context.Context, *plugin.GetPluginInfoRequest) (*
 	return &plugin.GetPluginInfoResponse{}, nil
 }
 
-func (p *Plugin) setEntry(spireKeyID string, newEntry *keyEntry) bool {
+func (p *Plugin) setEntry(spireKeyID string, newEntry *keyEntry) {
 	//TODO: validate new entry
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	oldEntry, hasKey := p.entries[spireKeyID]
-	if hasKey && oldEntry.CreationDate.Unix() > newEntry.CreationDate.Unix() {
-		//TODO: log this. Also when there is a key and it's updated
-		return false
-	}
 	p.entries[spireKeyID] = newEntry
-	return true
 }
 
 func (p *Plugin) entry(spireKeyID string) (*keyEntry, bool) {
@@ -203,6 +202,42 @@ func (p *Plugin) entry(spireKeyID string) (*keyEntry, bool) {
 	defer p.mu.Unlock()
 	value, hasKey := p.entries[spireKeyID]
 	return value, hasKey
+}
+
+func (p *Plugin) createKey(ctx context.Context, spireKeyID string, keyType keymanager.KeyType) (*keyEntry, error) {
+	description := getDescription(spireKeyID)
+	keySpec, err := keySpecFromKeyType(keyType)
+	if err != nil {
+		return nil, err
+	}
+
+	createKeyInput := &kms.CreateKeyInput{
+		Description:           aws.String(description),
+		KeyUsage:              aws.String(kms.KeyUsageTypeSignVerify),
+		CustomerMasterKeySpec: aws.String(keySpec),
+	}
+
+	key, err := p.kmsClient.CreateKeyWithContext(ctx, createKeyInput)
+	if err != nil {
+		return nil, err
+	}
+
+	pub, err := p.kmsClient.GetPublicKeyWithContext(ctx, &kms.GetPublicKeyInput{KeyId: key.KeyMetadata.KeyId})
+	if err != nil {
+		return nil, err
+	}
+
+	newEntry := &keyEntry{
+		KMSKeyID:     *pub.KeyId,
+		CreationDate: *key.KeyMetadata.CreationDate,
+		PublicKey: &keymanager.PublicKey{
+			Id:       spireKeyID,
+			Type:     keyType,
+			PkixData: pub.PublicKey,
+		},
+	}
+
+	return newEntry, nil
 }
 
 func (p *Plugin) publicKeys() []*keymanager.PublicKey {
@@ -217,8 +252,17 @@ func (p *Plugin) publicKeys() []*keymanager.PublicKey {
 	return keys
 }
 
-func (p *Plugin) processKMSKey(ctx context.Context, awsKeyID *string) error {
+func (p *Plugin) processAWSKey(ctx context.Context, alias *string, awsKeyID *string) error {
 	describeResp, err := p.kmsClient.DescribeKeyWithContext(ctx, &kms.DescribeKeyInput{KeyId: awsKeyID})
+	if err != nil {
+		return err
+	}
+
+	if *describeResp.KeyMetadata.Enabled == false {
+		return nil
+	}
+
+	spireKeyID, err := spireKeyIDFromAlias(*alias)
 	if err != nil {
 		return err
 	}
@@ -228,26 +272,54 @@ func (p *Plugin) processKMSKey(ctx context.Context, awsKeyID *string) error {
 		return err
 	}
 
-	if *describeResp.KeyMetadata.Enabled == true && strings.HasPrefix(*describeResp.KeyMetadata.Description, keyPrefix) {
-		descSplit := strings.SplitAfter(*describeResp.KeyMetadata.Description, keyPrefix)
-		spireKeyID := descSplit[1]
-		getPublicKeyResp, err := p.kmsClient.GetPublicKeyWithContext(ctx, &kms.GetPublicKeyInput{KeyId: awsKeyID})
-		if err != nil {
-			return err
-		}
-
-		e := &keyEntry{
-			AwsKeyID:     *awsKeyID,
-			CreationDate: *describeResp.KeyMetadata.CreationDate,
-			PublicKey: &keymanager.PublicKey{
-				Id:       spireKeyID,
-				Type:     keyType,
-				PkixData: getPublicKeyResp.PublicKey,
-			},
-		}
-		p.setEntry(spireKeyID, e) //TODO: check return value?
+	getPublicKeyResp, err := p.kmsClient.GetPublicKeyWithContext(ctx, &kms.GetPublicKeyInput{KeyId: awsKeyID})
+	if err != nil {
+		return err
 	}
+
+	newEntry := &keyEntry{
+		KMSKeyID:     *awsKeyID,
+		CreationDate: *describeResp.KeyMetadata.CreationDate,
+		PublicKey: &keymanager.PublicKey{
+			Id:       spireKeyID,
+			Type:     keyType,
+			PkixData: getPublicKeyResp.PublicKey,
+		},
+	}
+
+	// Just being defensive here. It shouldn't be necessary given alias can only be associated with one key
+	oldEntry, keyExists := p.entries[spireKeyID]
+	switch {
+	case keyExists && newEntry.CreationDate.Unix() < oldEntry.CreationDate.Unix():
+		p.log.Warn("An newer key already exists. Skipping keyID: %v", newEntry.KMSKeyID)
+		return nil
+	case keyExists && oldEntry.CreationDate.Unix() <= newEntry.CreationDate.Unix():
+		p.log.Warn("An older key was found. Overwriting keyID: %v", oldEntry.KMSKeyID)
+		p.setEntry(spireKeyID, newEntry)
+		return nil
+	default:
+		p.setEntry(spireKeyID, newEntry)
+
+	}
+
 	return nil
+}
+
+func spireKeyIDFromAlias(alias string) (string, error) {
+	tokens := strings.SplitAfter(alias, keyPrefix)
+	if len(tokens) != 2 {
+		return "", kmsErr.New("alias does not contain SPIRE prefix")
+	}
+
+	return tokens[1], nil
+}
+
+func getAlias(spireKeyID string) string {
+	return fmt.Sprintf("%v%v%v", aliasPrefix, keyPrefix, spireKeyID)
+}
+
+func getDescription(spireKeyID string) string {
+	return fmt.Sprintf("%v%v", keyPrefix, spireKeyID)
 }
 
 // validateConfig returns an error if any configuration provided does not meet acceptable criteria
