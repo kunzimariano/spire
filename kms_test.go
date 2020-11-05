@@ -20,12 +20,13 @@ const (
 	validAccessKeyID     = "AKIAIOSFODNN7EXAMPLE"
 	validSecretAccessKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 	validRegion          = "us-west-2"
-	awsKeyID             = "awsKeyID"
+	kmsKeyID             = "kmsKeyID"
 	spireKeyID           = "spireKeyID"
 )
 
 var (
-	ctx = context.Background()
+	ctx           = context.Background()
+	spireKeyAlias = fmt.Sprintf("%s%s", keyPrefix, spireKeyID)
 )
 
 func TestKeyManager(t *testing.T) {
@@ -51,53 +52,50 @@ func (ps *KmsPluginSuite) SetupTest() {
 		return ps.kmsClientFake, nil
 	})
 
-	plugin.SetLogger(hclog.Default())
+	plugin.SetLogger(hclog.NewNullLogger())
 	plugin.kmsClient = ps.kmsClientFake
 	ps.rawPlugin = plugin
 	ps.plugin = plugin
 }
 
 func (ps *KmsPluginSuite) Test_Configure() {
-	// Should return a list of keys
-	ps.verifyListKeys(true, nil)
+	ps.configurePluginWithExistingKeys()
 
 	// Should return Key metadata
-	ps.verifyDescribeKey(kms.CustomerMasterKeySpecRsa4096, nil)
+	ps.setupDescribeKey(kms.CustomerMasterKeySpecRsa4096, nil)
 
 	// Should return Key publicKey
-	ps.verifyGetPublicKey(nil)
+	ps.setupGetPublicKey(nil)
 
 	_, err := ps.plugin.Configure(ctx, ps.defaultConfigureRequest())
+
 	ps.Require().NoError(err)
 	ps.Require().Equal(1, len(ps.rawPlugin.entries))
-	ps.Require().Equal(ps.rawPlugin.entries[spireKeyID].AwsKeyID, awsKeyID)
+	ps.Require().Equal(ps.rawPlugin.entries[spireKeyID].KMSKeyID, kmsKeyID)
 	ps.Require().Equal(ps.rawPlugin.entries[spireKeyID].PublicKey.Type, keymanager.KeyType_RSA_4096)
 	ps.Require().Equal(ps.rawPlugin.entries[spireKeyID].PublicKey.Id, spireKeyID)
 }
 
 func (ps *KmsPluginSuite) Test_Configure_Invalid_Config() {
-	// Missing Access Key Id
-	invalidConfig := `{
+	missingAccessKeyConfig := `{
 		"secret_access_key":"secret_access_key",
 		"region":"region"
 	}`
-	_, err := ps.plugin.Configure(ctx, ps.configureRequest(invalidConfig))
+	_, err := ps.plugin.Configure(ctx, ps.configureRequest(missingAccessKeyConfig))
 	ps.Require().Error(err)
 
-	//Mission Secret Access Key
-	invalidConfig = `{
+	missingSecretAccessKeyConfig := `{
 		"access_key_id":"access_key",
 		"region":"region"
 	}`
-	_, err = ps.plugin.Configure(ctx, ps.configureRequest(invalidConfig))
+	_, err = ps.plugin.Configure(ctx, ps.configureRequest(missingSecretAccessKeyConfig))
 	ps.Assert().Error(err)
 
-	// Missing region
-	invalidConfig = `{
+	missingRegionConfig := `{
 		"access_key_id":"access_key",
 		"secret_access_key":"secret_access_key",
 	}`
-	_, err = ps.plugin.Configure(ctx, ps.configureRequest(invalidConfig))
+	_, err = ps.plugin.Configure(ctx, ps.configureRequest(missingRegionConfig))
 	ps.Assert().Error(err)
 }
 
@@ -110,10 +108,10 @@ func (ps *KmsPluginSuite) Test_Configure_DecodeError() {
 }
 
 func (ps *KmsPluginSuite) Test_Configure_ListKeysError() {
-	var errMsg = "List Keys error"
+	errMsg := "List Aliases error"
 
-	// ListKeys response should error
-	ps.verifyListKeys(true, errors.New(errMsg))
+	// Should return error
+	ps.setupListAliases(true, errors.New(errMsg))
 
 	_, err := ps.plugin.Configure(ctx, ps.defaultConfigureRequest())
 
@@ -122,24 +120,24 @@ func (ps *KmsPluginSuite) Test_Configure_ListKeysError() {
 }
 
 func (ps *KmsPluginSuite) Test_Configure_DescribeKeyError() {
-	// Should return a list of keys
-	ps.verifyListKeys(true, nil)
+	// Should return a list of Key aliases
+	ps.setupListAliases(true, nil)
 
-	// Response should error
-	ps.verifyDescribeKey(kms.CustomerMasterKeySpecRsa4096, errors.New("Describe Key error"))
+	// Should return error
+	ps.setupDescribeKey(kms.CustomerMasterKeySpecRsa4096, errors.New("Describe Key error"))
 
-	// An error response while calling describeKey only prevents the key to be included into the internal keys storage
+	// An error response while calling DescribeKey only prevents the key to be included into the internal keys storage
 	_, err := ps.plugin.Configure(ctx, ps.defaultConfigureRequest())
 	ps.Require().NoError(err)
 	ps.Require().Equal(0, len(ps.rawPlugin.entries))
 }
 
 func (ps *KmsPluginSuite) Test_Configure_UnsupportedKeySpecError() {
-	// Should return a list of keys
-	ps.verifyListKeys(true, nil)
+	// Should return a list of Key aliases
+	ps.setupListAliases(true, nil)
 
 	// Response should include an unsupported KeySpec
-	ps.verifyDescribeKey("Unsupported keySpec", nil)
+	ps.setupDescribeKey("Unsupported keySpec", nil)
 
 	// An error processing keySpec only prevents the key to be included into the internal keys storage
 	_, err := ps.plugin.Configure(ctx, ps.defaultConfigureRequest())
@@ -149,16 +147,16 @@ func (ps *KmsPluginSuite) Test_Configure_UnsupportedKeySpecError() {
 }
 
 func (ps *KmsPluginSuite) Test_Configure_GetPublicKeyError() {
-	var errMsg = "Get Public Key error"
+	errMsg := "Get Public Key error"
 
-	// Should return a list of keys
-	ps.verifyListKeys(true, nil)
+	// Should return a list of Key aliases
+	ps.setupListAliases(true, nil)
 
 	// Should return Key metadata
-	ps.verifyDescribeKey(kms.CustomerMasterKeySpecRsa4096, nil)
+	ps.setupDescribeKey(kms.CustomerMasterKeySpecRsa4096, nil)
 
-	// Response should error
-	ps.verifyGetPublicKey(errors.New(errMsg))
+	// Should return error
+	ps.setupGetPublicKey(errors.New(errMsg))
 
 	// An error response while calling getPublicKey only prevents the key to be included into the internal keys storage
 	_, err := ps.plugin.Configure(ctx, ps.defaultConfigureRequest())
@@ -167,13 +165,13 @@ func (ps *KmsPluginSuite) Test_Configure_GetPublicKeyError() {
 }
 
 func (ps *KmsPluginSuite) Test_GenerateKey_NonExistingKey() {
-	ps.configurePluginWithOutKeys()
+	ps.configurePluginWithoutKeys()
 
 	// Should return new created Key
-	ps.verifyCreateKey(kms.CustomerMasterKeySpecRsa4096, nil)
+	ps.setupCreateKey(kms.CustomerMasterKeySpecRsa4096, nil)
 
-	// Should return Key publicKey
-	ps.verifyGetPublicKey(nil)
+	// Should return Key PublicKey
+	ps.setupGetPublicKey(nil)
 
 	_, err := ps.plugin.GenerateKey(ctx, &keymanager.GenerateKeyRequest{
 		KeyId:   spireKeyID,
@@ -181,7 +179,7 @@ func (ps *KmsPluginSuite) Test_GenerateKey_NonExistingKey() {
 	})
 	ps.Require().NoError(err)
 	ps.Require().Equal(1, len(ps.rawPlugin.entries))
-	ps.Require().Equal(ps.rawPlugin.entries[spireKeyID].AwsKeyID, awsKeyID)
+	ps.Require().Equal(ps.rawPlugin.entries[spireKeyID].KMSKeyID, kmsKeyID)
 	ps.Require().Equal(ps.rawPlugin.entries[spireKeyID].PublicKey.Type, keymanager.KeyType_RSA_4096)
 	ps.Require().Equal(ps.rawPlugin.entries[spireKeyID].PublicKey.Id, spireKeyID)
 }
@@ -190,13 +188,13 @@ func (ps *KmsPluginSuite) Test_GenerateKey_ReplaceOldKey() {
 	ps.configurePluginWithExistingKeys()
 
 	// Should return new created Key
-	ps.verifyCreateKey(kms.CustomerMasterKeySpecRsa4096, nil)
+	ps.setupCreateKey(kms.CustomerMasterKeySpecRsa4096, nil)
 
 	// Should return Key publicKey
-	ps.verifyGetPublicKey(nil)
+	ps.setupGetPublicKey(nil)
 
 	// Should Schedule key for deletion
-	ps.verifyScheduleKeyDeletion(nil)
+	ps.setupScheduleKeyDeletion(nil)
 
 	_, err := ps.plugin.GenerateKey(ctx, &keymanager.GenerateKeyRequest{
 		KeyId:   spireKeyID,
@@ -204,7 +202,7 @@ func (ps *KmsPluginSuite) Test_GenerateKey_ReplaceOldKey() {
 	})
 	ps.Require().NoError(err)
 	ps.Require().Equal(1, len(ps.rawPlugin.entries))
-	ps.Require().Equal(ps.rawPlugin.entries[spireKeyID].AwsKeyID, awsKeyID)
+	ps.Require().Equal(ps.rawPlugin.entries[spireKeyID].KMSKeyID, kmsKeyID)
 	ps.Require().Equal(ps.rawPlugin.entries[spireKeyID].PublicKey.Type, keymanager.KeyType_RSA_4096)
 	ps.Require().Equal(ps.rawPlugin.entries[spireKeyID].PublicKey.Id, spireKeyID)
 }
@@ -223,10 +221,10 @@ func (ps *KmsPluginSuite) Test_GenerateKey_UnsupportedKeySpecError() {
 func (ps *KmsPluginSuite) Test_GenerateKey_KmsCreateKeyError() {
 	ps.configurePluginWithExistingKeys()
 
-	var errMsg = "Create Key Error"
+	errMsg := "Create Key Error"
 
-	// Response should error
-	ps.verifyCreateKey(kms.CustomerMasterKeySpecRsa4096, errors.New(errMsg))
+	// Should return error
+	ps.setupCreateKey(kms.CustomerMasterKeySpecRsa4096, errors.New(errMsg))
 
 	_, err := ps.plugin.GenerateKey(ctx, &keymanager.GenerateKeyRequest{
 		KeyId:   spireKeyID,
@@ -240,13 +238,13 @@ func (ps *KmsPluginSuite) Test_GenerateKey_KmsCreateKeyError() {
 func (ps *KmsPluginSuite) Test_GenerateKey_GetPublicKeyError() {
 	ps.configurePluginWithExistingKeys()
 
-	var errMsg = "Get Public Key Error"
+	errMsg := "Get Public Key Error"
 
 	// Should create the new key
-	ps.verifyCreateKey(kms.CustomerMasterKeySpecRsa4096, nil)
+	ps.setupCreateKey(kms.CustomerMasterKeySpecRsa4096, nil)
 
-	// Response should error
-	ps.verifyGetPublicKey(errors.New(errMsg))
+	// Should return error
+	ps.setupGetPublicKey(errors.New(errMsg))
 
 	_, err := ps.plugin.GenerateKey(ctx, &keymanager.GenerateKeyRequest{
 		KeyId:   spireKeyID,
@@ -259,30 +257,32 @@ func (ps *KmsPluginSuite) Test_GenerateKey_GetPublicKeyError() {
 func (ps *KmsPluginSuite) Test_GenerateKey_ScheduleKeyDeletionError() {
 	ps.configurePluginWithExistingKeys()
 
-	var errMsg = "Schedule Key Deletion Error"
+	errMsg := "Schedule Key Deletion Error"
 
 	// Should create the new key
-	ps.verifyCreateKey(kms.CustomerMasterKeySpecRsa4096, nil)
+	ps.setupCreateKey(kms.CustomerMasterKeySpecRsa4096, nil)
 
-	// Should return key Public Key
-	ps.verifyGetPublicKey(nil)
+	// Should return Key publicKey
+	ps.setupGetPublicKey(nil)
 
-	// Response should error
-	ps.verifyScheduleKeyDeletion(errors.New(errMsg))
+	// Should return error
+	ps.setupScheduleKeyDeletion(errors.New(errMsg))
 
-	_, err := ps.plugin.GenerateKey(ctx, &keymanager.GenerateKeyRequest{
+	resp, err := ps.plugin.GenerateKey(ctx, &keymanager.GenerateKeyRequest{
 		KeyId:   spireKeyID,
 		KeyType: keymanager.KeyType_RSA_4096,
 	})
-	ps.Require().Error(err)
-	ps.Require().Equal(err.Error(), errMsg)
+
+	ps.Require().NotNil(resp)
+	ps.Require().NoError(err)
+	ps.Require().Equal(1, len(ps.rawPlugin.entries))
 }
 
 func (ps *KmsPluginSuite) Test_SignData() {
 	ps.configurePluginWithExistingKeys()
 
 	// Should sign data
-	ps.verifySignData(nil)
+	ps.setupSignData(nil)
 
 	resp, err := ps.plugin.SignData(ctx, &keymanager.SignDataRequest{
 		KeyId: spireKeyID,
@@ -298,7 +298,7 @@ func (ps *KmsPluginSuite) Test_SignData() {
 }
 
 func (ps *KmsPluginSuite) Test_SignData_NoExistingKeyError() {
-	ps.configurePluginWithOutKeys()
+	ps.configurePluginWithoutKeys()
 
 	_, err := ps.plugin.SignData(ctx, &keymanager.SignDataRequest{
 		KeyId: spireKeyID,
@@ -312,10 +312,10 @@ func (ps *KmsPluginSuite) Test_SignData_NoExistingKeyError() {
 func (ps *KmsPluginSuite) Test_SignData_SignError() {
 	ps.configurePluginWithExistingKeys()
 
-	var errMsg = "Sign Data Error"
+	errMsg := "Sign Data Error"
 
-	// Response should error
-	ps.verifySignData(errors.New(errMsg))
+	// Should return error
+	ps.setupSignData(errors.New(errMsg))
 
 	_, err := ps.plugin.SignData(ctx, &keymanager.SignDataRequest{
 		KeyId: spireKeyID,
@@ -343,7 +343,7 @@ func (ps *KmsPluginSuite) Test_GetPublicKey_ExistingKey() {
 }
 
 func (ps *KmsPluginSuite) Test_GetPublicKey_NotExistingKey() {
-	ps.configurePluginWithOutKeys()
+	ps.configurePluginWithoutKeys()
 
 	resp, err := ps.plugin.GetPublicKey(ctx, &keymanager.GetPublicKeyRequest{
 		KeyId: spireKeyID,
@@ -354,7 +354,7 @@ func (ps *KmsPluginSuite) Test_GetPublicKey_NotExistingKey() {
 }
 
 func (ps *KmsPluginSuite) Test_GetPublicKey_MissingKeyID() {
-	ps.configurePluginWithOutKeys()
+	ps.configurePluginWithoutKeys()
 
 	_, err := ps.plugin.GetPublicKey(ctx, &keymanager.GetPublicKeyRequest{
 		KeyId: "",
@@ -374,7 +374,7 @@ func (ps *KmsPluginSuite) Test_GetPublicKeys_ExistingKeys() {
 }
 
 func (ps *KmsPluginSuite) Test_GetPublicKeys_NotExistingKey() {
-	ps.configurePluginWithOutKeys()
+	ps.configurePluginWithoutKeys()
 
 	resp, err := ps.plugin.GetPublicKeys(ctx, &keymanager.GetPublicKeysRequest{})
 
@@ -384,7 +384,7 @@ func (ps *KmsPluginSuite) Test_GetPublicKeys_NotExistingKey() {
 }
 
 func (ps *KmsPluginSuite) Test_GetPluginInfo() {
-	ps.configurePluginWithOutKeys()
+	ps.configurePluginWithoutKeys()
 
 	resp, err := ps.plugin.GetPluginInfo(ctx, &plugin.GetPluginInfoRequest{})
 
@@ -397,19 +397,19 @@ func (ps *KmsPluginSuite) configurePluginWithExistingKeys() {
 	ps.configurePlugin(true)
 }
 
-func (ps *KmsPluginSuite) configurePluginWithOutKeys() {
+func (ps *KmsPluginSuite) configurePluginWithoutKeys() {
 	ps.configurePlugin(false)
 }
 
 func (ps *KmsPluginSuite) configurePlugin(existingKeys bool) {
-	// Should return a list of keys
-	ps.verifyListKeys(existingKeys, nil)
+	// Should return a list of Keys aliases
+	ps.setupListAliases(existingKeys, nil)
 
 	// Should return Key metadata
-	ps.verifyDescribeKey(kms.CustomerMasterKeySpecRsa4096, nil)
+	ps.setupDescribeKey(kms.CustomerMasterKeySpecRsa4096, nil)
 
-	// Should return Key publicKey
-	ps.verifyGetPublicKey(nil)
+	// Should return Key PublicKey
+	ps.setupGetPublicKey(nil)
 
 	_, err := ps.plugin.Configure(ctx, ps.defaultConfigureRequest())
 	ps.Require().NoError(err)
@@ -443,40 +443,58 @@ func (ps *KmsPluginSuite) serializedConfiguration(accessKeyID, secretAccessKey, 
 		region)
 }
 
-func (ps *KmsPluginSuite) verifyListKeys(withKeys bool, mockError error) {
+func (ps *KmsPluginSuite) setupListKeys(withKeys bool, fakeError error) {
 	var keys []*kms.KeyListEntry
 
 	if withKeys {
 		keys = append(keys, &kms.KeyListEntry{
 			KeyArn: aws.String("arn:aws:iam::123456789012:user/Development/key/1"),
-			KeyId:  aws.String(awsKeyID),
+			KeyId:  aws.String(kmsKeyID),
 		})
 	}
 
 	ps.kmsClientFake.expectedListKeysInput = &kms.ListKeysInput{}
-	ps.kmsClientFake.listKeysErr = mockError
+	ps.kmsClientFake.listKeysErr = fakeError
 
 	ps.kmsClientFake.listKeysOutput = &kms.ListKeysOutput{
 		Keys: keys,
 	}
 }
 
-func (ps *KmsPluginSuite) verifyDescribeKey(keySpec string, mockError error) {
+func (ps *KmsPluginSuite) setupListAliases(withAliases bool, fakeError error) {
+	var aliases []*kms.AliasListEntry
+
+	if withAliases {
+		aliases = append(aliases, &kms.AliasListEntry{
+			AliasName:   aws.String(spireKeyAlias),
+			TargetKeyId: aws.String(kmsKeyID),
+		})
+	}
+
+	ps.kmsClientFake.expectedListAliasesInput = &kms.ListAliasesInput{}
+	ps.kmsClientFake.listAliasesErr = fakeError
+
+	ps.kmsClientFake.listAliasesOutput = &kms.ListAliasesOutput{
+		Aliases: aliases,
+	}
+}
+
+func (ps *KmsPluginSuite) setupDescribeKey(keySpec string, fakeError error) {
 	km := &kms.KeyMetadata{
-		KeyId:                 aws.String(awsKeyID),
+		KeyId:                 aws.String(kmsKeyID),
 		Description:           aws.String(keyPrefix + spireKeyID),
 		CustomerMasterKeySpec: aws.String(keySpec),
 		Enabled:               aws.Bool(true),
 		CreationDate:          aws.Time(time.Now()),
 	}
 
-	ps.kmsClientFake.expectedDescribeKeyInput = &kms.DescribeKeyInput{KeyId: aws.String(awsKeyID)}
-	ps.kmsClientFake.describeKeyErr = mockError
+	ps.kmsClientFake.expectedDescribeKeyInput = &kms.DescribeKeyInput{KeyId: aws.String(kmsKeyID)}
+	ps.kmsClientFake.describeKeyErr = fakeError
 
 	ps.kmsClientFake.describeKeyOutput = &kms.DescribeKeyOutput{KeyMetadata: km}
 }
 
-func (ps *KmsPluginSuite) verifyGetPublicKey(mockError error) {
+func (ps *KmsPluginSuite) setupGetPublicKey(fakeError error) {
 	var data string
 
 	for n := 0; n < 4096; n++ {
@@ -485,22 +503,22 @@ func (ps *KmsPluginSuite) verifyGetPublicKey(mockError error) {
 
 	pub := &kms.GetPublicKeyOutput{
 		CustomerMasterKeySpec: aws.String(kms.CustomerMasterKeySpecEccNistP256),
-		KeyId:                 aws.String(awsKeyID),
+		KeyId:                 aws.String(kmsKeyID),
 		KeyUsage:              aws.String(signVerifyKeyUsage),
 		PublicKey:             []byte(data),
 		SigningAlgorithms:     []*string{aws.String(kms.SigningAlgorithmSpecRsassaPssSha256)},
 	}
 
-	ps.kmsClientFake.expectedGetPublicKeyInput = &kms.GetPublicKeyInput{KeyId: aws.String(awsKeyID)}
-	ps.kmsClientFake.getPublicKeyErr = mockError
+	ps.kmsClientFake.expectedGetPublicKeyInput = &kms.GetPublicKeyInput{KeyId: aws.String(kmsKeyID)}
+	ps.kmsClientFake.getPublicKeyErr = fakeError
 
 	ps.kmsClientFake.getPublicKeyOutput = pub
 }
 
-func (ps *KmsPluginSuite) verifyCreateKey(keySpec string, mockError error) {
-	var desc = aws.String(keyPrefix + spireKeyID)
-	var ku = aws.String(kms.KeyUsageTypeSignVerify)
-	var ks = aws.String(keySpec)
+func (ps *KmsPluginSuite) setupCreateKey(keySpec string, fakeError error) {
+	desc := aws.String(keyPrefix + spireKeyID)
+	ku := aws.String(kms.KeyUsageTypeSignVerify)
+	ks := aws.String(keySpec)
 
 	ps.kmsClientFake.expectedCreateKeyInput = &kms.CreateKeyInput{
 		Description:           desc,
@@ -508,10 +526,10 @@ func (ps *KmsPluginSuite) verifyCreateKey(keySpec string, mockError error) {
 		CustomerMasterKeySpec: ks,
 	}
 
-	ps.kmsClientFake.createKeyErr = mockError
+	ps.kmsClientFake.createKeyErr = fakeError
 
 	km := &kms.KeyMetadata{
-		KeyId:                 aws.String(awsKeyID),
+		KeyId:                 aws.String(kmsKeyID),
 		CreationDate:          aws.Time(time.Now()),
 		Description:           desc,
 		KeyUsage:              ku,
@@ -520,28 +538,29 @@ func (ps *KmsPluginSuite) verifyCreateKey(keySpec string, mockError error) {
 	ps.kmsClientFake.createKeyOutput = &kms.CreateKeyOutput{KeyMetadata: km}
 }
 
-func (ps *KmsPluginSuite) verifyScheduleKeyDeletion(mockError error) {
+func (ps *KmsPluginSuite) setupScheduleKeyDeletion(fakeError error) {
 	ps.kmsClientFake.expectedScheduleKeyDeletionInput = &kms.ScheduleKeyDeletionInput{
-		KeyId: aws.String(awsKeyID),
+		KeyId:               aws.String(kmsKeyID),
+		PendingWindowInDays: aws.Int64(7),
 	}
 
-	ps.kmsClientFake.scheduleKeyDeletionErr = mockError
+	ps.kmsClientFake.scheduleKeyDeletionErr = fakeError
 
 	ps.kmsClientFake.scheduleKeyDeletionOutput = &kms.ScheduleKeyDeletionOutput{
-		KeyId:        aws.String(awsKeyID),
+		KeyId:        aws.String(kmsKeyID),
 		DeletionDate: aws.Time(time.Now()),
 	}
 }
 
-func (ps *KmsPluginSuite) verifySignData(mockError error) {
+func (ps *KmsPluginSuite) setupSignData(fakeError error) {
 	ps.kmsClientFake.expectedSignInput = &kms.SignInput{
-		KeyId:            aws.String(awsKeyID),
+		KeyId:            aws.String(kmsKeyID),
 		Message:          []byte("data"),
 		MessageType:      aws.String(kms.MessageTypeDigest),
 		SigningAlgorithm: aws.String(kms.SigningAlgorithmSpecRsassaPkcs1V15Sha256),
 	}
 
-	ps.kmsClientFake.signErr = mockError
+	ps.kmsClientFake.signErr = fakeError
 
 	ps.kmsClientFake.signOutput = &kms.SignOutput{
 		Signature: []byte("signature"),
