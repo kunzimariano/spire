@@ -12,7 +12,6 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/spiffe/spire/pkg/server/plugin/keymanager"
 	"github.com/spiffe/spire/proto/spire/common/plugin"
-	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 )
 
@@ -210,19 +209,20 @@ func (ps *KmsPluginSuite) Test_Configures() {
 			_, err := ps.plugin.Configure(ctx, tt.configureRequest)
 
 			if tt.expectedErr != "" {
-				require.Error(t, err)
-				require.Equal(t, err.Error(), tt.expectedErr)
+				ps.Require().Error(err)
+				ps.Require().Equal(err.Error(), tt.expectedErr)
+				ps.Require().Equal(err.Error(), tt.expectedErr)
 
 				return
 			}
 
-			require.NoError(t, err)
-			require.Equal(t, len(tt.expectedEntries), len(ps.rawPlugin.entries))
+			ps.Require().NoError(err)
+			ps.Require().Equal(len(tt.expectedEntries), len(ps.rawPlugin.entries))
 
 			for k, v := range tt.expectedEntries {
-				require.Equal(t, v.KMSKeyID, ps.rawPlugin.entries[k].KMSKeyID)
-				require.Equal(t, v.PublicKey.Id, ps.rawPlugin.entries[k].PublicKey.Id)
-				require.Equal(t, v.PublicKey.Type, ps.rawPlugin.entries[k].PublicKey.Type)
+				ps.Require().Equal(v.KMSKeyID, ps.rawPlugin.entries[k].KMSKeyID)
+				ps.Require().Equal(v.PublicKey.Id, ps.rawPlugin.entries[k].PublicKey.Id)
+				ps.Require().Equal(v.PublicKey.Type, ps.rawPlugin.entries[k].PublicKey.Type)
 			}
 		})
 	}
@@ -340,7 +340,7 @@ func (ps *KmsPluginSuite) Test_GenerateKey() {
 			ps.setupGetPublicKey("")
 
 			_, err := ps.plugin.Configure(ctx, ps.configureRequestWithDefaults())
-			require.NoError(t, err)
+			ps.Require().NoError(err)
 
 			ps.setupGetPublicKey(tt.getPublicKeyErr)
 
@@ -355,19 +355,19 @@ func (ps *KmsPluginSuite) Test_GenerateKey() {
 			})
 
 			if tt.err != "" {
-				require.Error(t, err)
-				require.Equal(t, err.Error(), tt.err)
+				ps.Require().Error(err)
+				ps.Require().Equal(err.Error(), tt.err)
 
 				return
 			}
 
-			require.NoError(t, err)
-			require.Equal(t, len(tt.expectedEntries), len(ps.rawPlugin.entries))
+			ps.Require().NoError(err)
+			ps.Require().Equal(len(tt.expectedEntries), len(ps.rawPlugin.entries))
 
 			for k, v := range tt.expectedEntries {
-				require.Equal(t, v.KMSKeyID, ps.rawPlugin.entries[k].KMSKeyID)
-				require.Equal(t, v.PublicKey.Id, ps.rawPlugin.entries[k].PublicKey.Id)
-				require.Equal(t, v.PublicKey.Type, ps.rawPlugin.entries[k].PublicKey.Type)
+				ps.Require().Equal(v.KMSKeyID, ps.rawPlugin.entries[k].KMSKeyID)
+				ps.Require().Equal(v.PublicKey.Id, ps.rawPlugin.entries[k].PublicKey.Id)
+				ps.Require().Equal(v.PublicKey.Type, ps.rawPlugin.entries[k].PublicKey.Type)
 			}
 		})
 	}
@@ -416,7 +416,7 @@ func (ps *KmsPluginSuite) Test_SignData() {
 			ps.setupGetPublicKey("")
 
 			_, err := ps.plugin.Configure(ctx, ps.configureRequestWithDefaults())
-			require.NoError(t, err)
+			ps.Require().NoError(err)
 
 			resp, err := ps.plugin.SignData(ctx, &keymanager.SignDataRequest{
 				KeyId: spireKeyID,
@@ -427,13 +427,13 @@ func (ps *KmsPluginSuite) Test_SignData() {
 			})
 
 			if tt.err != "" {
-				require.Error(t, err)
-				require.Equal(t, err.Error(), tt.err)
+				ps.Require().Error(err)
+				ps.Require().Equal(err.Error(), tt.err)
 
 				return
 			}
-			require.NotNil(t, resp)
-			require.NoError(t, err)
+			ps.Require().NotNil(resp)
+			ps.Require().NoError(err)
 
 		})
 	}
@@ -477,20 +477,20 @@ func (ps *KmsPluginSuite) Test_GetPublicKey() {
 			ps.setupGetPublicKey("")
 
 			_, err := ps.plugin.Configure(ctx, ps.configureRequestWithDefaults())
-			require.NoError(t, err)
+			ps.Require().NoError(err)
 
 			resp, err := ps.plugin.GetPublicKey(ctx, &keymanager.GetPublicKeyRequest{
 				KeyId: tt.keyID,
 			})
 
 			if tt.err != "" {
-				require.Error(t, err)
-				require.Equal(t, err.Error(), tt.err)
+				ps.Require().Error(err)
+				ps.Require().Equal(err.Error(), tt.err)
 
 				return
 			}
-			require.NotNil(t, resp)
-			require.NoError(t, err)
+			ps.Require().NotNil(resp)
+			ps.Require().NoError(err)
 		})
 	}
 }
@@ -523,21 +523,21 @@ func (ps *KmsPluginSuite) Test_GetPublicKeys() {
 			ps.setupGetPublicKey("")
 
 			_, err := ps.plugin.Configure(ctx, ps.configureRequestWithDefaults())
-			require.NoError(t, err)
+			ps.Require().NoError(err)
 
 			resp, err := ps.plugin.GetPublicKeys(ctx, &keymanager.GetPublicKeysRequest{})
 
 			if tt.err != "" {
-				require.Error(t, err)
-				require.Equal(t, err.Error(), tt.err)
+				ps.Require().Error(err)
+				ps.Require().Equal(err.Error(), tt.err)
 
 				return
 			}
 
-			require.NotNil(t, resp)
-			require.NoError(t, err)
+			ps.Require().NotNil(resp)
+			ps.Require().NoError(err)
 
-			require.Equal(t, len(tt.aliases), len(resp.PublicKeys))
+			ps.Require().Equal(len(tt.aliases), len(resp.PublicKeys))
 
 		})
 	}
@@ -565,8 +565,8 @@ func (ps *KmsPluginSuite) Test_GetPluginInfo() {
 
 			resp, err := ps.plugin.GetPluginInfo(ctx, &plugin.GetPluginInfoRequest{})
 
-			require.NotNil(t, resp)
-			require.NoError(t, err)
+			ps.Require().NotNil(resp)
+			ps.Require().NoError(err)
 		})
 	}
 }
