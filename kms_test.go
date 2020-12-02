@@ -20,7 +20,7 @@ const (
 	validAccessKeyID     = "AKIAIOSFODNN7EXAMPLE"
 	validSecretAccessKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 	validRegion          = "us-west-2"
-	kmsKeyID             = "kmsKeyID"
+	kmsKeyID             = "SPIRE_SERVER_KEY/spireKeyID"
 	spireKeyID           = "spireKeyID"
 )
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/kms"
@@ -27,7 +28,8 @@ const (
 	aliasPrefix = "alias/"
 	keyPrefix   = "SPIRE_SERVER_KEY/"
 
-	keyIDTag = "KeyID"
+	keyIDTag = "key_id"
+	aliasTag = "alias"
 )
 
 type keyEntry struct {
@@ -85,24 +87,31 @@ func (p *Plugin) Configure(ctx context.Context, req *plugin.ConfigureRequest) (*
 	}
 
 	// TODO: pagination
-	p.log.Info("Fetching keys from KMS")
+	p.log.Debug("Fetching keys from KMS")
 	aliasesResp, err := p.kmsClient.ListAliasesWithContext(ctx, &kms.ListAliasesInput{})
 	if err != nil {
 		return nil, kmsErr.New("failed to fetch keys: %v", err)
 	}
 
+	p.log.Debug(fmt.Sprintf("%v keys were found", len(aliasesResp.Aliases)))
+	count := 0
 	for _, alias := range aliasesResp.Aliases {
+		l := p.log.With(keyIDTag, *alias.TargetKeyId, aliasTag, *alias.AliasName)
+		l.Debug("Processing key")
 		entry, err := p.buildKeyEntry(ctx, alias.AliasName, alias.TargetKeyId)
 		switch {
 		case err != nil:
 			return nil, kmsErr.New("failed to process KMS key: %v", err)
 		case entry != nil:
 			err := p.setEntry(entry.PublicKey.Id, *entry)
+			l.Debug("Added key")
+			count++
 			if err != nil {
 				return nil, err
 			}
 		}
 	}
+	p.log.Debug(fmt.Sprintf("%v keys were added", count))
 
 	return &plugin.ConfigureResponse{}, nil
 }
@@ -147,14 +156,15 @@ func (p *Plugin) GenerateKey(ctx context.Context, req *keymanager.GenerateKeyReq
 
 		go func() {
 			//schedule delete
-			_, err = p.kmsClient.ScheduleKeyDeletionWithContext(ctx, &kms.ScheduleKeyDeletionInput{
+			c, cancel := context.WithTimeout(context.Background(), time.Second*30)
+			defer cancel()
+			_, err = p.kmsClient.ScheduleKeyDeletionWithContext(c, &kms.ScheduleKeyDeletionInput{
 				KeyId:               &oldEntry.KMSKeyID,
 				PendingWindowInDays: aws.Int64(7),
 			})
 			if err != nil {
-				p.log.With(keyIDTag, &oldEntry.KMSKeyID).Error("It was not possible to schedule deletion for key: %v", err)
+				p.log.Error("It was not possible to schedule deletion for key", "error", err, keyIDTag, &oldEntry.KMSKeyID)
 			}
-
 		}()
 	}
 
@@ -309,29 +319,30 @@ func (p *Plugin) createKey(ctx context.Context, spireKeyID string, keyType keyma
 }
 
 func (p *Plugin) buildKeyEntry(ctx context.Context, alias *string, awsKeyID *string) (*keyEntry, error) {
-	describeResp, err := p.kmsClient.DescribeKeyWithContext(ctx, &kms.DescribeKeyInput{KeyId: awsKeyID})
+	l := p.log.With(keyIDTag, *awsKeyID, aliasTag, alias)
+	describeResp, err := p.kmsClient.DescribeKeyWithContext(ctx, &kms.DescribeKeyInput{KeyId: alias})
 	if err != nil {
 		return nil, kmsErr.New("failed to describe key: %v", err)
 	}
 
 	if *describeResp.KeyMetadata.Enabled == false {
-		p.log.With(keyIDTag, awsKeyID).Debug("Skipping disabled key")
+		l.Debug("Skipped disabled key")
 		return nil, nil
 	}
 
 	spireKeyID, err := spireKeyIDFromAlias(*alias)
 	if err != nil {
-		p.log.With(keyIDTag, awsKeyID).Debug("Skipping key: %v", err)
+		l.Debug("Skipped key", "reason", err)
 		return nil, nil
 	}
 
 	keyType, err := keyTypeFromKeySpec(*describeResp.KeyMetadata.CustomerMasterKeySpec)
 	if err != nil {
-		p.log.With(keyIDTag, awsKeyID).Warn("Skipping key: %v", err)
+		l.Debug("Skipped key", "reason", err)
 		return nil, nil
 	}
 
-	getPublicKeyResp, err := p.kmsClient.GetPublicKeyWithContext(ctx, &kms.GetPublicKeyInput{KeyId: awsKeyID})
+	getPublicKeyResp, err := p.kmsClient.GetPublicKeyWithContext(ctx, &kms.GetPublicKeyInput{KeyId: alias})
 	if err != nil {
 		return nil, kmsErr.New("failed to get public key: %v", err)
 	}
@@ -350,7 +361,7 @@ func (p *Plugin) buildKeyEntry(ctx context.Context, alias *string, awsKeyID *str
 func spireKeyIDFromAlias(alias string) (string, error) {
 	tokens := strings.SplitAfter(alias, keyPrefix)
 	if len(tokens) != 2 {
-		return "", kmsErr.New("alias does not contain SPIRE prefix")
+		return "", fmt.Errorf("alias does not contain SPIRE prefix")
 	}
 
 	return tokens[1], nil
@@ -445,7 +456,7 @@ func keyTypeFromKeySpec(keySpec string) (keymanager.KeyType, error) {
 	case kms.CustomerMasterKeySpecEccNistP384:
 		return keymanager.KeyType_EC_P384, nil
 	default:
-		return keymanager.KeyType_UNSPECIFIED_KEY_TYPE, kmsErr.New("unsupported key spec: %v", keySpec)
+		return keymanager.KeyType_UNSPECIFIED_KEY_TYPE, fmt.Errorf("unsupported key spec: %v", keySpec)
 	}
 
 }
