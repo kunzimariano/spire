@@ -86,32 +86,17 @@ func (p *Plugin) Configure(ctx context.Context, req *plugin.ConfigureRequest) (*
 		return nil, kmsErr.New("failed to create KMS client: %v", err)
 	}
 
-	// TODO: pagination
 	p.log.Debug("Fetching keys from KMS")
-	aliasesResp, err := p.kmsClient.ListAliasesWithContext(ctx, &kms.ListAliasesInput{})
-	if err != nil {
-		return nil, kmsErr.New("failed to fetch keys: %v", err)
-	}
-
-	p.log.Debug(fmt.Sprintf("%v keys were found", len(aliasesResp.Aliases)))
-	count := 0
-	for _, alias := range aliasesResp.Aliases {
-		l := p.log.With(keyIDTag, *alias.TargetKeyId, aliasTag, *alias.AliasName)
-		l.Debug("Processing key")
-		entry, err := p.buildKeyEntry(ctx, alias.AliasName, alias.TargetKeyId)
-		switch {
-		case err != nil:
-			return nil, kmsErr.New("failed to process KMS key: %v", err)
-		case entry != nil:
-			err := p.setEntry(entry.PublicKey.Id, *entry)
-			l.Debug("Added key")
-			count++
-			if err != nil {
-				return nil, err
-			}
+	var nextMarker *string
+	for {
+		nextMarker, err = p.fetchAliasesPage(ctx, nextMarker)
+		if err != nil {
+			return nil, err
+		}
+		if nextMarker == nil {
+			break
 		}
 	}
-	p.log.Debug(fmt.Sprintf("%v keys were added", count))
 
 	return &plugin.ConfigureResponse{}, nil
 }
@@ -356,6 +341,34 @@ func (p *Plugin) buildKeyEntry(ctx context.Context, alias *string, awsKeyID *str
 			PkixData: getPublicKeyResp.PublicKey,
 		},
 	}, err
+}
+
+func (p *Plugin) fetchAliasesPage(ctx context.Context, marker *string) (*string, error) {
+	aliasesResp, err := p.kmsClient.ListAliasesWithContext(ctx, &kms.ListAliasesInput{
+		Marker: marker,
+	})
+	if err != nil {
+		return nil, kmsErr.New("failed to fetch keys: %v", err)
+	}
+
+	p.log.Debug(fmt.Sprintf("%v keys were found", len(aliasesResp.Aliases)))
+
+	for _, alias := range aliasesResp.Aliases {
+		l := p.log.With(keyIDTag, *alias.TargetKeyId, aliasTag, *alias.AliasName)
+		l.Debug("Processing key")
+		entry, err := p.buildKeyEntry(ctx, alias.AliasName, alias.TargetKeyId)
+		switch {
+		case err != nil:
+			return nil, kmsErr.New("failed to process KMS key: %v", err)
+		case entry != nil:
+			err := p.setEntry(entry.PublicKey.Id, *entry)
+			l.Debug("Added key")
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return aliasesResp.NextMarker, nil
 }
 
 func spireKeyIDFromAlias(alias string) (string, error) {
