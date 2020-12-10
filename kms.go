@@ -17,16 +17,13 @@ import (
 	"github.com/zeebo/errs"
 )
 
-// TODOS:
-// - timeouts
-
 var (
 	kmsErr = errs.Class("kms")
 )
 
 const (
-	aliasPrefix = "alias/"
-	keyPrefix   = "SPIRE_SERVER_KEY/"
+	aliasPrefix      = "alias/"
+	defaultKeyPrefix = "SPIRE_SERVER_KEY/"
 
 	keyIDTag = "key_id"
 	aliasTag = "alias"
@@ -44,6 +41,7 @@ type Plugin struct {
 	mu        sync.RWMutex
 	entries   map[string]keyEntry
 	kmsClient kmsClient
+	keyPrefix string
 
 	hooks struct {
 		newClient func(config *Config) (kmsClient, error)
@@ -55,6 +53,7 @@ type Config struct {
 	AccessKeyID     string `hcl:"access_key_id" json:"access_key_id"`
 	SecretAccessKey string `hcl:"secret_access_key" json:"secret_access_key"`
 	Region          string `hcl:"region" json:"region"`
+	KeyPrefix       string `hcl:"key_prefix" json:"key_prefix"`
 }
 
 // New returns an instantiated plugin
@@ -76,10 +75,12 @@ func (p *Plugin) SetLogger(log hclog.Logger) {
 
 // Configure sets up the plugin
 func (p *Plugin) Configure(ctx context.Context, req *plugin.ConfigureRequest) (*plugin.ConfigureResponse, error) {
-	config, err := validateConfig(req.Configuration)
+	config, err := p.validateConfig(req.Configuration)
 	if err != nil {
 		return nil, err
 	}
+
+	p.keyPrefix = config.KeyPrefix
 
 	p.kmsClient, err = p.hooks.newClient(config)
 	if err != nil {
@@ -268,7 +269,7 @@ func (p *Plugin) entry(spireKeyID string) (keyEntry, bool) {
 
 func (p *Plugin) createKey(ctx context.Context, spireKeyID string, keyType keymanager.KeyType) (keyEntry, error) {
 	res := keyEntry{}
-	description := descriptionFromSpireKeyID(spireKeyID)
+	description := p.descriptionFromSpireKeyID(spireKeyID)
 	keySpec, err := keySpecFromKeyType(keyType)
 	if err != nil {
 		return res, err
@@ -292,7 +293,7 @@ func (p *Plugin) createKey(ctx context.Context, spireKeyID string, keyType keyma
 
 	res = keyEntry{
 		KMSKeyID: *pub.KeyId,
-		Alias:    aliasFromSpireKeyID(spireKeyID),
+		Alias:    p.aliasFromSpireKeyID(spireKeyID),
 		PublicKey: &keymanager.PublicKey{
 			Id:       spireKeyID,
 			Type:     keyType,
@@ -315,7 +316,7 @@ func (p *Plugin) buildKeyEntry(ctx context.Context, alias *string, awsKeyID *str
 		return nil, nil
 	}
 
-	spireKeyID, err := spireKeyIDFromAlias(*alias)
+	spireKeyID, err := p.spireKeyIDFromAlias(*alias)
 	if err != nil {
 		l.Debug("Skipped key", "reason", err)
 		return nil, nil
@@ -371,8 +372,8 @@ func (p *Plugin) fetchAliasesPage(ctx context.Context, marker *string) (*string,
 	return aliasesResp.NextMarker, nil
 }
 
-func spireKeyIDFromAlias(alias string) (string, error) {
-	tokens := strings.SplitAfter(alias, keyPrefix)
+func (p *Plugin) spireKeyIDFromAlias(alias string) (string, error) {
+	tokens := strings.SplitAfter(alias, p.keyPrefix)
 	if len(tokens) != 2 {
 		return "", fmt.Errorf("alias does not contain SPIRE prefix")
 	}
@@ -380,32 +381,36 @@ func spireKeyIDFromAlias(alias string) (string, error) {
 	return tokens[1], nil
 }
 
-func aliasFromSpireKeyID(spireKeyID string) string {
-	return fmt.Sprintf("%v%v%v", aliasPrefix, keyPrefix, spireKeyID)
+func (p *Plugin) aliasFromSpireKeyID(spireKeyID string) string {
+	return fmt.Sprintf("%v%v%v", aliasPrefix, p.keyPrefix, spireKeyID)
 }
 
-func descriptionFromSpireKeyID(spireKeyID string) string {
-	return fmt.Sprintf("%v%v", keyPrefix, spireKeyID)
+func (p *Plugin) descriptionFromSpireKeyID(spireKeyID string) string {
+	return fmt.Sprintf("%v%v", p.keyPrefix, spireKeyID)
 }
 
 // validateConfig returns an error if any configuration provided does not meet acceptable criteria
-func validateConfig(c string) (*Config, error) {
+func (p *Plugin) validateConfig(c string) (*Config, error) {
 	config := new(Config)
 
 	if err := hcl.Decode(config, c); err != nil {
 		return nil, kmsErr.New("unable to decode configuration: %v", err)
 	}
 
+	if config.Region == "" {
+		return nil, kmsErr.New("configuration is missing a region")
+	}
+
 	if config.AccessKeyID == "" {
-		return nil, kmsErr.New("configuration is missing an access key id")
+		p.log.Warn("configuration is missing an access key id, make sure your EC2 instance can access KMS")
 	}
 
 	if config.SecretAccessKey == "" {
-		return nil, kmsErr.New("configuration is missing a secret access key")
+		p.log.Warn("configuration is missing a secret access key, make sure your EC2 instance can access KMS")
 	}
 
-	if config.Region == "" {
-		return nil, kmsErr.New("configuration is missing a region")
+	if config.KeyPrefix == "" {
+		config.KeyPrefix = defaultKeyPrefix
 	}
 
 	return config, nil

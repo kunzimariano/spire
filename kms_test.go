@@ -26,7 +26,7 @@ const (
 
 var (
 	ctx           = context.Background()
-	spireKeyAlias = fmt.Sprintf("%s%s", keyPrefix, spireKeyID)
+	spireKeyAlias = fmt.Sprintf("%s%s", defaultKeyPrefix, spireKeyID)
 )
 
 func TestKeyManager(t *testing.T) {
@@ -131,15 +131,15 @@ func (ps *KmsPluginSuite) Test_Configures() {
 				 		"secret_access_key":"secret_access_key",
 				 		"region":"region"
 					 }`),
-			expectedErr: "kms: configuration is missing an access key id",
+			aliases: []*kms.AliasListEntry{},
 		},
 		{
 			name: "missing secret access key",
 			configureRequest: ps.configureRequestWith(`{
 				 		"access_key_id":"access_key",
 				 		"region":"region"
-				 	}`),
-			expectedErr: "kms: configuration is missing a secret access key",
+					 }`),
+			aliases: []*kms.AliasListEntry{},
 		},
 		{
 			name: "missing region",
@@ -612,7 +612,7 @@ func (ps *KmsPluginSuite) setupListAliases(aliases []*kms.AliasListEntry, fakeEr
 func (ps *KmsPluginSuite) setupDescribeKey(keySpec string, fakeError string) {
 	km := &kms.KeyMetadata{
 		KeyId:                 aws.String(kmsKeyID),
-		Description:           aws.String(keyPrefix + spireKeyID),
+		Description:           aws.String(defaultKeyPrefix + spireKeyID),
 		CustomerMasterKeySpec: aws.String(keySpec),
 		Enabled:               aws.Bool(true),
 		CreationDate:          aws.Time(time.Now()),
@@ -649,7 +649,7 @@ func (ps *KmsPluginSuite) setupGetPublicKey(fakeError string) {
 }
 
 func (ps *KmsPluginSuite) setupCreateKey(keySpec string, fakeError string) {
-	desc := aws.String(keyPrefix + spireKeyID)
+	desc := aws.String(defaultKeyPrefix + spireKeyID)
 	ku := aws.String(kms.KeyUsageTypeSignVerify)
 	ks := aws.String(keySpec)
 
