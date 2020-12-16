@@ -355,6 +355,9 @@ func (p *Plugin) fetchAliasesPage(ctx context.Context, marker *string) (*string,
 	p.log.Debug(fmt.Sprintf("%v keys were found", len(aliasesResp.Aliases)))
 
 	for _, alias := range aliasesResp.Aliases {
+		if alias.AliasName == nil || alias.TargetKeyId == nil {
+			continue
+		}
 		l := p.log.With(keyIDTag, *alias.TargetKeyId, aliasTag, *alias.AliasName)
 		l.Debug("Processing key")
 		entry, err := p.buildKeyEntry(ctx, alias.AliasName, alias.TargetKeyId)
