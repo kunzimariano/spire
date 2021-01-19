@@ -1,4 +1,4 @@
-package kms
+package awskms
 
 import (
 	"context"
@@ -9,25 +9,35 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/kms"
-	"github.com/golang/protobuf/proto"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/hcl"
+	"github.com/spiffe/spire/pkg/common/catalog"
+	"github.com/spiffe/spire/pkg/server/plugin/keymanager"
 	"github.com/spiffe/spire/proto/spire/common/plugin"
-	"github.com/spiffe/spire/proto/spire/server/keymanager"
 	"github.com/zeebo/errs"
-)
-
-var (
-	kmsErr = errs.Class("kms")
+	"google.golang.org/protobuf/proto"
 )
 
 const (
+	pluginName       = "awskms"
 	aliasPrefix      = "alias/"
 	defaultKeyPrefix = "SPIRE_SERVER_KEY/"
 
 	keyIDTag = "key_id"
 	aliasTag = "alias"
 )
+
+var (
+	kmsErr = errs.Class(pluginName)
+)
+
+func BuiltIn() catalog.Plugin {
+	return builtin(New())
+}
+
+func builtin(p *Plugin) catalog.Plugin {
+	return catalog.MakePlugin(pluginName, keymanager.PluginServer(p))
+}
 
 type keyEntry struct {
 	KMSKeyID  string
@@ -37,6 +47,7 @@ type keyEntry struct {
 
 // Plugin is the main representation of this keymanager plugin
 type Plugin struct {
+	keymanager.UnsafeKeyManagerServer
 	log       hclog.Logger
 	mu        sync.RWMutex
 	entries   map[string]keyEntry
@@ -129,7 +140,6 @@ func (p *Plugin) GenerateKey(ctx context.Context, req *keymanager.GenerateKeyReq
 		if err != nil {
 			return nil, kmsErr.New("failed to create alias: %v", err)
 		}
-
 	} else {
 		//update alias
 		_, err = p.kmsClient.UpdateAliasWithContext(ctx, &kms.UpdateAliasInput{
@@ -162,7 +172,6 @@ func (p *Plugin) GenerateKey(ctx context.Context, req *keymanager.GenerateKeyReq
 	return &keymanager.GenerateKeyResponse{
 		PublicKey: clonePublicKey(newEntry.PublicKey),
 	}, nil
-
 }
 
 // SignData creates a digital signature for the data to be signed
@@ -211,7 +220,6 @@ func (p *Plugin) GetPublicKey(ctx context.Context, req *keymanager.GetPublicKeyR
 	return &keymanager.GetPublicKeyResponse{
 		PublicKey: clonePublicKey(entry.PublicKey),
 	}, nil
-
 }
 
 // GetPublicKeys return the publicKey for all the keys
@@ -311,7 +319,7 @@ func (p *Plugin) buildKeyEntry(ctx context.Context, alias *string, awsKeyID *str
 		return nil, kmsErr.New("failed to describe key: %v", err)
 	}
 
-	if *describeResp.KeyMetadata.Enabled == false {
+	if !*describeResp.KeyMetadata.Enabled {
 		l.Debug("Skipped disabled key")
 		return nil, nil
 	}
@@ -479,7 +487,6 @@ func keyTypeFromKeySpec(keySpec string) (keymanager.KeyType, error) {
 	default:
 		return keymanager.KeyType_UNSPECIFIED_KEY_TYPE, fmt.Errorf("unsupported key spec: %v", keySpec)
 	}
-
 }
 
 func keySpecFromKeyType(keyType keymanager.KeyType) (string, error) {

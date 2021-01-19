@@ -1,4 +1,4 @@
-package kms
+package awskms
 
 import (
 	"testing"
@@ -112,6 +112,5 @@ func (k *kmsClientFake) CreateAliasWithContext(ctx aws.Context, input *kms.Creat
 }
 
 func (k *kmsClientFake) UpdateAliasWithContext(ctw aws.Context, input *kms.UpdateAliasInput, opts ...request.Option) (*kms.UpdateAliasOutput, error) {
-
 	return nil, nil
 }
